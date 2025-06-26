@@ -176,3 +176,5 @@ cython_debug/
 csv_files/
 
 tableau_wip_files/
+
+catboost_info
