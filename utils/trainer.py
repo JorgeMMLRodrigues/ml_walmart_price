@@ -1,20 +1,31 @@
-import time, json, csv, inspect
+import time
+import json
+import csv
+import inspect
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
-from sklearn.model_selection import ParameterGrid, ParameterSampler
+
+from sklearn.model_selection import ParameterGrid, ParameterSampler, TimeSeriesSplit
 from sklearn.metrics import (
-    mean_absolute_error, mean_squared_error, r2_score,
-    accuracy_score, f1_score, roc_auc_score, confusion_matrix
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    accuracy_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix
 )
 
-# Add imports for halving search
+# halving imports (needed if you ever switch back to HalvingRandomSearchCV)
 from sklearn.experimental import enable_halving_search_cv  # noqa: F401
 from sklearn.model_selection import HalvingRandomSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import make_scorer
+
 
 class ModelTrainer:
     def __init__(
@@ -62,7 +73,7 @@ class ModelTrainer:
                 self.param_grid, self.n_iter, random_state=self.random_state
             ))
         elif self.search == "halving":
-            # halving search will be performed in train()
+            # halving will be handled in train()
             self.param_list = None
         else:
             raise ValueError("search must be 'grid', 'random', or 'halving'")
@@ -203,61 +214,74 @@ class ModelTrainer:
 
             # ETA
             elapsed = time.time() - t0
-            rem = elapsed * (total - (pbar.n))
+            rem = elapsed * (total - pbar.n)
             pbar.set_postfix({prim: f"{row[prim]:.4f}", "eta": f"{rem:.1f}s"})
 
         self.csv_file.close()
         return best_params, best_score
 
     def _train_halving(self):
-            """
-            A manual successive‐halving implementation that shows a tqdm bar + ETA
-            at each budget level.
-            """
-            # 1) Prepare the initial random candidate list (exclude max_iter here)
-            base_params = {k: v for k, v in self.param_grid.items() if k != "max_iter"}
-            budgets     = sorted(self.param_grid["max_iter"])
-            # Draw n_iter random combos of the OTHER params
-            candidates = list(ParameterSampler(base_params, self.n_iter, random_state=self.random_state))
+        """
+        A manual successive‐halving implementation that shows a tqdm bar + ETA
+        at each budget level and writes each trial to the CSV.
+        """
+        from sklearn.model_selection import ParameterSampler
 
-            # 2) Decide on the primary metric for elimination
-            prim = list(self.metrics)[0]           # e.g. "wmae"
-            # We assume lower-is-better for reg, except if prim=="r2"
-            minimize = True if (self.problem_type=="reg" and prim!="r2") else False
+        # 1) Prepare candidates & budgets
+        base_params = {k: v for k, v in self.param_grid.items() if k != "max_iter"}
+        budgets     = sorted(self.param_grid["max_iter"])
+        candidates  = list(ParameterSampler(base_params, self.n_iter, random_state=self.random_state))
 
-            # 3) Run successive halving
-            for budget in budgets:
-                next_round = []
-                pbar = tqdm(
-                    candidates,
-                    desc=f"{self.model_name} halving ({budget} iters)",
-                    unit="combo"
-                )
-                for params in pbar:
-                    # inject this budget
-                    params_full = {**params, "max_iter": budget}
-                    # evaluate over CV folds to get primary metric
-                    scores = []
-                    for tr_idx, val_idx in self._get_folds():
-                        X_tr, y_tr = self.X.iloc[tr_idx], self.y.iloc[tr_idx]
-                        X_val, y_val = self.X.iloc[val_idx], self.y.iloc[val_idx]
-                        model = self.model_factory(params_full)
-                        model.fit(X_tr, y_tr)
-                        y_pred = model.predict(X_val)
-                        scores.append(self.metrics[prim](y_val, y_pred))
-                    avg_score = float(np.mean(scores))
-                    # update bar with current score
-                    pbar.set_postfix({prim: f"{avg_score:.4f}"})
-                    # collect for next round
-                    next_round.append((avg_score, params))
+        # 2) Choose primary metric
+        prim     = list(self.metrics)[0]
+        minimize = not (self.problem_type == "reg" and prim == "r2")
 
-                # 4) eliminate worst half
-                # for minimize tasks (like mae, wmae), sort ascending; else descending
-                next_round.sort(key=lambda x: x[0], reverse=(not minimize))
-                keep_n = max(1, len(next_round)//2)
-                candidates = [p for _, p in next_round[:keep_n]]
+        # 3) Successive halving
+        for budget in budgets:
+            next_round = []
+            pbar = tqdm(
+                candidates,
+                desc=f"{self.model_name} halving ({budget} iters)",
+                unit="combo"
+            )
+            for params in pbar:
+                params_full = {**params, "max_iter": budget}
 
-            # 5) after final budget, the top candidate is best
-            best_params = {**candidates[0], "max_iter": budgets[-1]}
-            best_score  = next_round[0][0]  # primary metric of top combo
-            return best_params, best_score
+                # evaluate CV
+                scores = []
+                for tr_idx, val_idx in self._get_folds():
+                    X_tr, y_tr = self.X.iloc[tr_idx], self.y.iloc[tr_idx]
+                    X_val, y_val = self.X.iloc[val_idx], self.y.iloc[val_idx]
+                    model = self.model_factory(params_full)
+                    model.fit(X_tr, y_tr)
+                    y_pred = model.predict(X_val)
+                    scores.append(self.metrics[prim](y_val, y_pred))
+                avg_score = float(np.mean(scores))
+
+                # write CSV row
+                row = {
+                    "model_name": self.model_name,
+                    "param_json": json.dumps(params_full),
+                    prim:         avg_score
+                }
+                for m in self.metrics:
+                    if m != prim:
+                        row.setdefault(m, "")
+                self.writer.writerow(row)
+                self.csv_file.flush()
+
+                # update bar
+                pbar.set_postfix({prim: f"{avg_score:.4f}"})
+                next_round.append((avg_score, params))
+
+            # eliminate worst half
+            next_round.sort(key=lambda x: x[0], reverse=not minimize)
+            keep_n = max(1, len(next_round) // 2)
+            candidates = [p for _, p in next_round[:keep_n]]
+
+        # 4) Final best
+        best_params = {**candidates[0], "max_iter": budgets[-1]}
+        best_score  = next_round[0][0]
+
+        self.csv_file.close()
+        return best_params, best_score
