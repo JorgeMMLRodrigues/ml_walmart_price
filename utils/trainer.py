@@ -222,21 +222,28 @@ class ModelTrainer:
 
     def _train_halving(self):
         """
-        A manual successive‐halving implementation that shows a tqdm bar + ETA
-        at each budget level and writes each trial to the CSV.
+        Successive-halving that evaluates *all* metrics per trial
+        and writes every row fully populated to CSV.
         """
         from sklearn.model_selection import ParameterSampler
 
-        # 1) Prepare candidates & budgets
+        # 1) Build initial candidate list & budgets
         base_params = {k: v for k, v in self.param_grid.items() if k != "max_iter"}
         budgets     = sorted(self.param_grid["max_iter"])
-        candidates  = list(ParameterSampler(base_params, self.n_iter, random_state=self.random_state))
+        candidates  = list(ParameterSampler(
+            base_params,
+            self.n_iter,
+            random_state=self.random_state
+        ))
 
-        # 2) Choose primary metric
-        prim     = list(self.metrics)[0]
-        minimize = not (self.problem_type == "reg" and prim == "r2")
+        # 2) Decide whether to minimize each metric
+        #    (by default all reg-metrics are minimize except r2)
+        minimize_map = {
+            name: not (self.problem_type=="reg" and name=="r2")
+            for name in self.metrics
+        }
 
-        # 3) Successive halving
+        # 3) Halving loop
         for budget in budgets:
             next_round = []
             pbar = tqdm(
@@ -244,44 +251,70 @@ class ModelTrainer:
                 desc=f"{self.model_name} halving ({budget} iters)",
                 unit="combo"
             )
+
             for params in pbar:
+                # inject the tree-budget
                 params_full = {**params, "max_iter": budget}
 
-                # evaluate CV
-                scores = []
+                # track per-metric scores
+                fold_scores = {m: [] for m in self.metrics}
+
+                # CV folds
                 for tr_idx, val_idx in self._get_folds():
                     X_tr, y_tr = self.X.iloc[tr_idx], self.y.iloc[tr_idx]
                     X_val, y_val = self.X.iloc[val_idx], self.y.iloc[val_idx]
+
                     model = self.model_factory(params_full)
                     model.fit(X_tr, y_tr)
-                    y_pred = model.predict(X_val)
-                    scores.append(self.metrics[prim](y_val, y_pred))
-                avg_score = float(np.mean(scores))
+                    y_pred, prob = (model.predict(X_val),
+                                    None)
 
-                # write CSV row
+                    # compute every metric
+                    for name, fn in self.metrics.items():
+                        sig = inspect.signature(fn).parameters
+                        try:
+                            if len(sig) == 2:
+                                sc = fn(y_val, y_pred)
+                            elif len(sig) == 3:
+                                sc = fn(y_val, y_pred, prob)
+                            else:
+                                sc = np.nan
+                        except:
+                            sc = np.nan
+                        fold_scores[name].append(sc)
+
+                # average folds
+                avg_scores = {m: float(np.mean(fold_scores[m]))
+                              for m in self.metrics}
+
+                # write full row
                 row = {
                     "model_name": self.model_name,
                     "param_json": json.dumps(params_full),
-                    prim:         avg_score
+                    **avg_scores
                 }
-                for m in self.metrics:
-                    if m != prim:
-                        row.setdefault(m, "")
                 self.writer.writerow(row)
                 self.csv_file.flush()
 
-                # update bar
-                pbar.set_postfix({prim: f"{avg_score:.4f}"})
-                next_round.append((avg_score, params))
+                # update progress bar with primary metric
+                prim = list(self.metrics)[0]
+                pbar.set_postfix({prim: f"{avg_scores[prim]:.4f}"})
 
-            # eliminate worst half
-            next_round.sort(key=lambda x: x[0], reverse=not minimize)
-            keep_n = max(1, len(next_round) // 2)
+                # candidate for next round elimination
+                next_round.append((avg_scores, params))
+
+            # eliminate worst half using the primary metric
+            prim = list(self.metrics)[0]
+            next_round.sort(
+                key=lambda x: x[0][prim],
+                reverse=not minimize_map[prim]
+            )
+            keep_n = max(1, len(next_round)//2)
             candidates = [p for _, p in next_round[:keep_n]]
 
-        # 4) Final best
+        # 4) Return best
         best_params = {**candidates[0], "max_iter": budgets[-1]}
-        best_score  = next_round[0][0]
-
+        best_score  = next_round[0][0][prim]
         self.csv_file.close()
         return best_params, best_score
+
