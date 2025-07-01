@@ -21,3 +21,4 @@ prophet
 tbats
 scikit-learn
 catboost
+ngboost
