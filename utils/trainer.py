@@ -116,23 +116,29 @@ class ModelTrainer:
         self.writer = csv.DictWriter(self.csv_file, fieldnames=header)
         self.writer.writeheader()
 
-    def _get_folds(self):
-        n = len(self.X)
-        # single hold-out if float
-        if isinstance(self.cv_splitter, float):
-            cut = int(n * (1 - self.cv_splitter))
-            yield np.arange(cut), np.arange(cut, n)
-        # sklearn splitter
-        elif hasattr(self.cv_splitter, "split"):
-            for tr, val in self.cv_splitter.split(self.X, self.y):
-                yield tr, val
-        # list of tuples
-        elif isinstance(self.cv_splitter, (list, tuple)):
-            for tr, val in self.cv_splitter:
-                yield tr, val
-        else:
-            # default 80/20 holdout
-            cut = int(n * 0.8)
+
+    def _get_folds(self): 
+        n = len(self.X) 
+        # If cv_splitter is None, use the entire dataset for both training and validation.
+        if self.cv_splitter is None: 
+            yield np.arange(n), np.arange(n) 
+            return 
+
+        # single hold-out if float 
+        if isinstance(self.cv_splitter, float): 
+            cut = int(n * (1 - self.cv_splitter)) 
+            yield np.arange(cut), np.arange(cut, n) 
+        # sklearn splitter 
+        elif hasattr(self.cv_splitter, "split"): 
+            for tr, val in self.cv_splitter.split(self.X, self.y): 
+                yield tr, val 
+        # list of tuples 
+        elif isinstance(self.cv_splitter, (list, tuple)): 
+            for tr, val in self.cv_splitter: 
+                yield tr, val 
+        else: 
+            # Original default 80/20 holdout as a fallback
+            cut = int(n * 0.8) 
             yield np.arange(cut), np.arange(cut, n)
 
     def train(self):
