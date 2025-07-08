@@ -1,8 +1,13 @@
 import streamlit as st
 import base64 
-from typing import Dict
+from typing import Dict, List
 import pandas as pd
 import altair as alt
+from typing import Literal
+from matplotlib import cm, colors
+from typing import Optional
+import numpy as np
+
 
 def plot_timeseries(
     df: pd.DataFrame,
@@ -71,32 +76,33 @@ def styled_block(
 
 
 
-def human_formatter(x, pos=None):
-    """
-    Format a number into K/M/B/T suffix form:
-      1 000 →   1.0K
-      1 000 000 → 1.0M
-      1 000 000 000 → 1.0B
-      1 000 000 000 000 → 1.0T
-    """
+def human_formatter(
+    x,
+    *,
+    is_money:   bool = False,
+    is_percent: bool = False,
+) -> str:
+    """Compact K/M/B/T formatting, with optional ' $' or ' %' suffix."""
     try:
         val = float(x)
     except (TypeError, ValueError):
         return str(x)
-
-    abs_val = abs(val)
-    sign = "-" if val < 0 else ""
-
+    abs_val, sign = abs(val), "-" if val < 0 else ""
     if abs_val >= 1e12:
-        return f"{sign}{abs_val/1e12:.1f}T"
+        out = f"{sign}{abs_val/1e12:.1f} T"
     elif abs_val >= 1e9:
-        return f"{sign}{abs_val/1e9:.1f}B"
+        out = f"{sign}{abs_val/1e9:.1f} B"
     elif abs_val >= 1e6:
-        return f"{sign}{abs_val/1e6:.1f}M"
+        out = f"{sign}{abs_val/1e6:.1f} M"
     elif abs_val >= 1e3:
-        return f"{sign}{abs_val/1e3:.1f}K"
+        out = f"{sign}{abs_val/1e3:.1f} K"
     else:
-        return f"{int(val)}"
+        out = f"{val:,.0f}"
+    if is_money:
+        return f"{out} $"
+    if is_percent:
+        return f"{out} %"
+    return out
 
 
 def header(
@@ -202,17 +208,30 @@ def show_metrics_generic(
 # New: sidebar controls grouping
 
 def sidebar_controls(
-    stores: list[str], depts: list[str]
-) -> Dict[str, str|bool]:
+    stores: list[str],
+    depts:  list[str],
+) -> dict[str, str]:
+    store_choice = st.sidebar.selectbox("Select Store", stores, key="sel_store")
+    dept_choice  = st.sidebar.selectbox("Select Department", depts, key="sel_dept")
+
+    window_choice = st.sidebar.selectbox(
+        "Limit to:",
+        ["Full Range", "Last 52 Weeks", "Last 104 Weeks"],
+        key="sel_window",
+    )
+
+    # ← ranking moved here
+    ranking_choice = st.sidebar.selectbox(
+        "Ranking criterion",
+        ["Total Sales", "YOY % Growth", "YOY $ Growth"],
+        key="sel_ranking",
+    )
+
     return {
-        "store": st.sidebar.selectbox("Select Store", stores),
-        "dept": st.sidebar.selectbox("Select Department", depts),
-        "window": st.sidebar.selectbox(
-            "Limit to:", ["Full Range","Last 52 Weeks","Last 104 Weeks"]
-        ),
-        "rf_only": st.sidebar.checkbox(
-            "RF prediction span only", value=False
-        )
+        "store":   store_choice,
+        "dept":    dept_choice,
+        "window":  window_choice,
+        "ranking": ranking_choice,
     }
 
 def show_rf_metrics(mae: float, r2: float) -> None:
@@ -225,52 +244,118 @@ def show_rf_metrics(mae: float, r2: float) -> None:
 
 def plot_actual_vs_rf(
     df: pd.DataFrame,
-    date_col: str,
-    actual_col: str,
-    rf_col: str,
-    title: str = "Actual vs RF Predictions",
-    height: int = 400
+    date_col:   str = "date",
+    actual_col: str = "Actual",
+    warmup_col: str = "Pred_Warmup",
+    pred_col:   str = "Predicted",
+    title:      str = "Actual vs RF Predictions",
+    height:     int = 400
 ) -> None:
-    """
-    Build and render an Altair line chart comparing two series.
-    """
+    # melt all three series
     df_chart = (
         df
-        .groupby(date_col)
-        .agg(
-            Actual       = (actual_col, "sum"),
-            RandomForest = (rf_col,    "sum")
-        )
-        .reset_index()
         .melt(
-            id_vars=date_col,
+            id_vars=[date_col],
+            value_vars=[actual_col, warmup_col, pred_col],
             var_name="Series",
             value_name="Sales"
         )
     )
+
+    # define the color mapping
+    color_scale = alt.Scale(
+        domain=["Actual", "Pred_Warmup", "Predicted"],
+        range=["steelblue", "steelblue", "orange"]
+    )
+
     chart = (
         alt.Chart(df_chart)
            .mark_line()
            .encode(
                x=alt.X(f"{date_col}:T", title="Date"),
-               y=alt.Y("Sales:Q",    title="Total Weekly Sales"),
-               color=alt.Color(
-                   "Series:N",
-                   scale=alt.Scale(
-                       domain=["Actual","RandomForest"],
-                       range=["steelblue","orange"]
-                   ),
-                   legend=alt.Legend(title=None)
-               ),
-               tooltip=[f"{date_col}:T","Series:N","Sales:Q"]
+               y=alt.Y("Sales:Q", title="Total Weekly Sales"),
+               color=alt.Color("Series:N", scale=color_scale, legend=None),
+               tooltip=[f"{date_col}:T", "Series:N", "Sales:Q"]
            )
            .properties(height=height)
            .interactive()
     )
+
     if title:
         st.subheader(title)
     st.altair_chart(chart, use_container_width=True)
 
+def _smooth_cmap(base: str, lo: float = 0.30, hi: float = 1.00) -> colors.ListedColormap:
+    """
+    Trim a Matplotlib colormap to the [lo, hi] fraction of its range,
+    yielding richer, more saturated colors.
+    """
+    base_cmap = cm.get_cmap(base, 256)
+    sliced    = base_cmap(np.linspace(lo, hi, 256))
+    return colors.ListedColormap(sliced)
+
+
+
+def show_ranking_grid(
+    df_rank:    pd.DataFrame,
+    metric_col: str,
+    label_col:  str,
+    top_n:      int              = 5,
+    title:      Optional[str]    = None,
+) -> None:
+    if title:
+        st.subheader(title)
+
+    # pick & sort
+    best  = (
+        df_rank
+          .nlargest(top_n, metric_col)
+          .sort_values(metric_col, ascending=False)
+          .reset_index(drop=True)
+    )
+    worst = (
+        df_rank
+          .nsmallest(top_n, metric_col)
+          .sort_values(metric_col, ascending=True)
+          .reset_index(drop=True)
+    )
+
+    # build colormaps
+    green_cmap = _smooth_cmap("Greens")
+    red_cmap   = _smooth_cmap("Reds")
+
+    # global vmin/vmax for consistency
+    vals = df_rank[metric_col].astype(float)
+    vmin, vmax = float(vals.min()), float(vals.max())
+
+    money_flag   = metric_col != "yoy_pct"
+    percent_flag = metric_col == "yoy_pct"
+    fmt_fn = lambda v: human_formatter(v, is_money=money_flag, is_percent=percent_flag)
+
+    # style
+    best_style = (
+        best.style
+            .format({metric_col: fmt_fn})
+            .background_gradient(cmap=green_cmap, subset=[metric_col], vmin=vmin, vmax=vmax)
+    )
+    worst_style = (
+        worst.style
+            .format({metric_col: fmt_fn})
+            .background_gradient(cmap=red_cmap.reversed(), subset=[metric_col], vmin=vmin, vmax=vmax)
+    )
+
+    # display
+    col1, col2 = st.columns(2, gap="small")
+    with col1:
+        st.markdown("#### 🟢 Best")
+        st.dataframe(best_style,  use_container_width=True, hide_index=True)
+    with col2:
+        st.markdown("#### 🔴 Worst")
+        st.dataframe(worst_style, use_container_width=True, hide_index=True)
+
+
+
 def footer() -> None:
     st.markdown("---")
     st.caption("Jorge Rodrigues | Data Analyst @ Ironhack")
+

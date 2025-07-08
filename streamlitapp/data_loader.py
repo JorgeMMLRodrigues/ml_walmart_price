@@ -6,3 +6,7 @@ import streamlit as st
 def load_sales(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["date"])
     return df
+
+
+
+
