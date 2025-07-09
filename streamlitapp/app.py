@@ -5,8 +5,7 @@ from metrics import (total_sales,
                      load_rf_summary, 
                      span_stats, 
                      week_span,
-                     build_ranking_table,
-                     merge_for_rf_comparison
+                     build_ranking_table
 )
 
 from data_loader import load_sales
@@ -18,13 +17,11 @@ from ui_components import (
      show_metrics_generic,
      sidebar_controls,
      plot_timeseries,
-     show_rf_metrics,
-     plot_actual_vs_rf,
      show_ranking_grid,
  )
 import altair as alt
-from filters import filter_df, aggregate_timeseries, compute_rf_trends
-import numpy as np
+from filters import filter_df, aggregate_timeseries
+import json
 
 
 # ------------------------------------
@@ -52,8 +49,8 @@ limit_window = controls["window"]
 metric_label = controls["ranking"]           # ← use sidebar choice
 metric_map   = {
     "Total Sales":  "total",
-    "YOY % Growth": "yoy_pct",
-    "YOY $ Growth": "yoy_diff",
+    "% Growth": "yoy_pct",
+    "$ Growth": "yoy_diff",
 }
 metric_col = metric_map[metric_label]
 limit_window = controls["window"]
@@ -129,7 +126,7 @@ plot_timeseries(
 st.markdown("---")
 st.header("🏆 Ranking")
 
-# decide what to group by
+# 1) Decide grouping
 if store_choice == "All Stores":
     if dept_choice == "All Departments":
         group_col, label_name = "store", "Store"
@@ -141,80 +138,136 @@ else:
     else:
         group_col, label_name = None, f"Dept {dept_choice} in Store {store_choice}"
 
-# build the ranking table if needed
-if group_col:
-    rank_tbl = build_ranking_table(df_sel, group_col)
-
-# now render, re-using metric_label & metric_col from the sidebar
+# 2) Single‐slice (no grouping): show one metric as before
 if group_col is None:
-    # single slice → show one metric
-    total_val = df_sel["weekly_sales"].sum()
-    tmp       = df_sel.assign(__all__=0)
-    yoy       = build_ranking_table(tmp, "__all__").iloc[0]
+    # build & stitch
+    df_fc = (
+        df_sel
+        .groupby("date")
+        .agg(
+            Actual        = ("weekly_sales",                 "sum"),
+            Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+        )
+        .reset_index()
+    )
+    pred_start = df_fc.loc[df_fc["Predicted_raw"] > 0, "date"].min()
+    df_fc["Forecast"] = df_fc["Actual"]
+    df_fc.loc[df_fc["date"] >= pred_start, "Forecast"] = df_fc.loc[df_fc["date"] >= pred_start, "Predicted_raw"]
 
-    val_map = {
-        "total":    total_val,
-        "yoy_pct":  yoy["yoy_pct"],
-        "yoy_diff": yoy["yoy_diff"],
-    }
-    val = val_map[metric_col]
+    # compute the three
+    act_tot   = df_fc["Actual"].sum()
+    first_act = df_fc["Actual"].iloc[0]
+    last_act  = df_fc["Actual"].iloc[-1]
+    diff_act  = last_act - first_act
+    pct_act   = (diff_act / first_act * 100) if first_act else float("nan")
+
+    if metric_col == "total":
+        disp = act_tot; m_flag, p_flag = True, False
+    elif metric_col == "yoy_diff":
+        disp = diff_act; m_flag, p_flag = True, False
+    else:  # "yoy_pct"
+        disp = pct_act; m_flag, p_flag = False, True
 
     st.metric(
         f"{label_name} – {metric_label}",
-        human_formatter(val,
-                        is_money=(metric_col!="yoy_pct"),
-                        is_percent=(metric_col=="yoy_pct"))
+        human_formatter(disp, is_money=m_flag, is_percent=p_flag)
     )
+
+# 3) Grouping: build a small ranking DataFrame & use show_ranking_grid
 else:
-    # full Best/Worst grid
+    records = []
+    for key, sub in df_sel.groupby(group_col):
+        # build & stitch each subgroup
+        df_fc_sub = (
+            sub
+            .groupby("date")
+            .agg(
+                Actual        = ("weekly_sales",                 "sum"),
+                Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+            )
+            .reset_index()
+        )
+        pr_start = df_fc_sub.loc[df_fc_sub["Predicted_raw"] > 0, "date"].min()
+        df_fc_sub["Forecast"] = df_fc_sub["Actual"]
+        df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Forecast"] = (
+            df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Predicted_raw"]
+        )
+
+        # compute metrics
+        act_tot   = df_fc_sub["Actual"].sum()
+        first_act = df_fc_sub["Actual"].iloc[0]
+        last_act  = df_fc_sub["Actual"].iloc[-1]
+        diff_act  = last_act - first_act
+        pct_act   = (diff_act / first_act * 100) if first_act else float("nan")
+
+        # pick the one we’re ranking on
+        if metric_col == "total":
+            val = act_tot
+        elif metric_col == "yoy_diff":
+            val = diff_act
+        else:  # "yoy_pct"
+            val = pct_act
+
+        records.append({ label_name: key, metric_col: val })
+
+    df_rank = pd.DataFrame.from_records(records)
+
     show_ranking_grid(
-        df_rank   = rank_tbl[[group_col, metric_col]]
-                         .rename(columns={group_col: label_name}),
-        metric_col= metric_col,
-        label_col = label_name,
-        top_n     = 10,
-        title     = f"Ranked by {metric_label}"
+        df_rank    = df_rank.rename(columns={group_col: label_name}),
+        metric_col = metric_col,
+        label_col  = label_name,
+        top_n      = 5,
+        title      = f"Ranked by {metric_label}"
     )
 
-# ──────────────────────────────────────────────────────────────
-#  Trend lines + change metric for Best & Worst groups
-# ──────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────
+# Trend lines + change metric for Best & Worst groups
+# ────────────────────────────────────────────────────────
 if group_col is not None:
+    best_key  = df_rank.nlargest(1, metric_col)[label_name].iloc[0]
+    worst_key = df_rank.nsmallest(1, metric_col)[label_name].iloc[0]
 
-    # Identify best & worst keys
-    best_key  = rank_tbl.nlargest(1, metric_col)[group_col].iloc[0]
-    worst_key = rank_tbl.nsmallest(1, metric_col)[group_col].iloc[0]
-
-    # Slice and (for YOY) cap at 104 weeks
     df_best  = df_sel[df_sel[group_col] == best_key].copy()
     df_worst = df_sel[df_sel[group_col] == worst_key].copy()
-    if metric_col in ("yoy_pct", "yoy_diff"):
-        cutoff = df_sel["date"].max() - pd.Timedelta(weeks=104)
-        df_best  = df_best [df_best ["date"] >= cutoff]
-        df_worst = df_worst[df_worst["date"] >= cutoff]
 
-    # Aggregate weekly_sales by date
-    ts_best_raw  = df_best.groupby("date")["weekly_sales"].sum().sort_index().rename("value")
+    # compute the half-span yw just like the grid
+    if limit_window == "Last 52 Weeks":
+        yw = 26
+    elif limit_window == "Last 104 Weeks":
+        yw = 52
+    elif limit_window == "Full Range":
+        total_days  = (df_sel["date"].max() - df_sel["date"].min()).days
+        total_weeks = total_days // 7
+        yw          = total_weeks // 2
+    else:
+        yw = 52
+
+    # define flags now, so they exist no matter what
+    money_flag   = (metric_col != "yoy_pct")
+    percent_flag = (metric_col == "yoy_pct")
+
+    # aggregate
+    ts_best_raw  = df_best .groupby("date")["weekly_sales"].sum().sort_index().rename("value")
     ts_worst_raw = df_worst.groupby("date")["weekly_sales"].sum().sort_index().rename("value")
 
-    # Transform based on metric
-    if metric_col == "total":
+    # if we don’t have enough points for a yw-week diff, fall back to totals
+    n_best  = len(ts_best_raw)
+    n_worst = len(ts_worst_raw)
+    if metric_col == "total" or n_best <= yw or n_worst <= yw:
         ts_best, ts_worst = ts_best_raw, ts_worst_raw
-        y_axis_label     = "Total Weekly Sales"
-    elif metric_col == "yoy_pct":
-        ts_best  = ts_best_raw.pct_change(52) * 100
-        ts_worst = ts_worst_raw.pct_change(52) * 100
-        y_axis_label     = "YOY % Change"
-    else:  # "yoy_diff"
-        ts_best  = ts_best_raw.diff(52)
-        ts_worst = ts_worst_raw.diff(52)
-        y_axis_label     = "YOY $ Change"
+        y_axis_label      = "Total Weekly Sales"
+    else:
+        if metric_col == "yoy_pct":
+            ts_best  = ts_best_raw .pct_change(yw) * 100
+            ts_worst = ts_worst_raw.pct_change(yw) * 100
+            y_axis_label = f"YOY % Change ({yw}w)"
+        else:
+            ts_best  = ts_best_raw .diff(yw)
+            ts_worst = ts_worst_raw.diff(yw)
+            y_axis_label = f"YOY $ Change ({yw}w)"
 
-    # Flags for formatting
-    money_flag   = metric_col != "yoy_pct"
-    percent_flag = metric_col == "yoy_pct"
-
-    # Build combined DataFrame
+    # build and plot
     df_trend = pd.concat([
         ts_best .reset_index().assign(Series="Best"),
         ts_worst.reset_index().assign(Series="Worst"),
@@ -222,73 +275,37 @@ if group_col is not None:
 
     col1, col2 = st.columns(2, gap="large")
 
-    # — Best panel —
     with col1:
         st.subheader(f"📈 Trend for Best: {best_key}")
-
-        # Show only the delta (latest value) as metric
         end_val   = ts_best.iloc[-1]
-        if metric_col in ("yoy_pct", "yoy_diff"):
-            delta_val = end_val
-        else:
-            delta_val = end_val - ts_best.iloc[0]
+        delta_val = end_val if metric_col in ("yoy_pct","yoy_diff") and n_best>yw else (end_val - ts_best.iloc[0])
+        st.metric(label=f"{metric_label} Change",
+                  value="",
+                  delta=human_formatter(delta_val, is_money=money_flag, is_percent=percent_flag))
+        base = alt.Chart(df_trend[df_trend["Series"]=="Best"])
+        main = base.mark_line(color="green") \
+                   .encode(x="date:T", y=alt.Y("value:Q", title=y_axis_label), tooltip=["date:T","value:Q"])
+        loess = base.transform_loess("date","value",bandwidth=0.3) \
+                    .mark_line(color="lightgrey", strokeDash=[4,4], size=1) \
+                    .encode(x="date:T", y="value:Q")
+        st.altair_chart((main+loess).interactive(), use_container_width=True)
 
-        st.metric(
-            label=f"{metric_label} Change",
-            value="",  # hide the primary value
-            delta=human_formatter(delta_val, is_money=money_flag, is_percent=percent_flag),
-        )
-
-        # Draw the lines
-        base_best = alt.Chart(df_trend[df_trend["Series"] == "Best"])
-        main_line = base_best.mark_line(color="green").encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("value:Q", title=y_axis_label),
-            tooltip=["date:T", "value:Q"],
-        )
-        trend_line = (
-            base_best
-              .transform_loess("date", "value", bandwidth=0.3)
-              .mark_line(color="lightgrey", strokeDash=[4,4], size=1)
-              .encode(x="date:T", y="value:Q")
-        )
-        st.altair_chart((main_line + trend_line).interactive(),
-                        use_container_width=True)
-
-    # — Worst panel —
     with col2:
         st.subheader(f"📉 Trend for Worst: {worst_key}")
-
         end_val   = ts_worst.iloc[-1]
-        if metric_col in ("yoy_pct", "yoy_diff"):
-            delta_val = end_val
-        else:
-            delta_val = end_val - ts_worst.iloc[0]
-
-        st.metric(
-            label=f"{metric_label} Change",
-            value="",
-            delta=human_formatter(delta_val, is_money=money_flag, is_percent=percent_flag),
-        )
-
-        base_worst = alt.Chart(df_trend[df_trend["Series"] == "Worst"])
-        main_line  = base_worst.mark_line(color="red").encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("value:Q", title=y_axis_label),
-            tooltip=["date:T", "value:Q"],
-        )
-        trend_line = (
-            base_worst
-              .transform_loess("date", "value", bandwidth=0.3)
-              .mark_line(color="lightgrey", strokeDash=[4,4], size=1)
-              .encode(x="date:T", y="value:Q")
-        )
-        st.altair_chart((main_line + trend_line).interactive(),
-                        use_container_width=True)
+        delta_val = end_val if metric_col in ("yoy_pct","yoy_diff") and n_worst>yw else (end_val - ts_worst.iloc[0])
+        st.metric(label=f"{metric_label} Change",
+                  value="",
+                  delta=human_formatter(delta_val, is_money=money_flag, is_percent=percent_flag))
+        base = alt.Chart(df_trend[df_trend["Series"]=="Worst"])
+        main = base.mark_line(color="red") \
+                   .encode(x="date:T", y=alt.Y("value:Q", title=y_axis_label), tooltip=["date:T","value:Q"])
+        loess = base.transform_loess("date","value",bandwidth=0.3) \
+                    .mark_line(color="lightgrey", strokeDash=[4,4], size=1) \
+                    .encode(x="date:T", y="value:Q")
+        st.altair_chart((main+loess).interactive(), use_container_width=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Random Forest comparisons
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("Random Forest Sales Forecast Comparison")
 
@@ -296,59 +313,226 @@ st.title("Random Forest Sales Forecast Comparison")
 mae, r2 = load_rf_summary("RandomForest02_summary.csv")
 show_metrics_generic([
     ("MAE", f"{mae:.2f}"),
-    ("R²",  f"{r2:.3f}"),
+    ("R²",  f"{r2:.3f}")
 ])
 
-# --- Compute trends on the filtered data
-tr = compute_rf_trends(
-    df_sel,
-    date_col="date",
-    actual_col="weekly_sales",
-    rf_col="rf_02_predicted_weekly_sales",
-    metric=metric_col
+# --- df_sel is already filtered by your sidebar (store/dept/window)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build the stitched forecast DataFrame from df_sel
+# ─────────────────────────────────────────────────────────────────────────────
+df_fc = (
+    df_sel
+    .groupby("date")
+    .agg(
+        Actual        = ("weekly_sales",                 "sum"),
+        Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+    )
+    .reset_index()
 )
 
-# --- Merge warm-up + out-of-sample predictions
-df_overlay = merge_for_rf_comparison(
-    ts_actual   = tr["ts_act"],
-    ts_pred     = tr["ts_rf"],
-    warmup_weeks=52
+pred_start = df_fc.loc[df_fc["Predicted_raw"] > 0, "date"].min()
+
+df_fc["Forecast"] = df_fc["Actual"]
+df_fc.loc[df_fc["date"] >= pred_start, "Forecast"] = df_fc.loc[df_fc["date"] >= pred_start, "Predicted_raw"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot Actual vs Stitched Forecast
+# ─────────────────────────────────────────────────────────────────────────────
+df_fc["Forecast_vis"] = df_fc["Forecast"].where(df_fc["date"] >= pred_start, pd.NA)
+
+# now melt Actual + the masked forecast
+df_chart = df_fc.melt(
+    id_vars   ="date",
+    value_vars=["Actual","Forecast_vis"],
+    var_name  ="Series",
+    value_name="Sales"
 )
 
-# --- Plot the stitched series
-st.subheader("📈 Actual vs Forecast Overlay")
-plot_actual_vs_rf(
-    df          = df_overlay,
-    date_col    = "date",
-    actual_col  = "Actual",
-    warmup_col  = "Pred_Warmup",
-    pred_col    = "Predicted",
-    title       = "Actual Sales vs Forecast"
+# rename for display
+df_chart["Series"] = df_chart["Series"].replace({"Forecast_vis":"Forecast"})
+
+color_scale = alt.Scale(domain=["Actual","Forecast"], range=["steelblue","orange"])
+chart = (
+    alt.Chart(df_chart)
+       .mark_line(strokeWidth=2)
+       .encode(
+           x=alt.X("date:T", title="Date"),
+           y=alt.Y("Sales:Q", title="Weekly Sales"),
+           color=alt.Color("Series:N", scale=color_scale, legend=None),
+           tooltip=["date:T","Series:N","Sales:Q"]
+       )
+       .properties(height=400)
+       .interactive()
 )
 
-# --- Compute totals apples→apples
-# 1) Actual over your *entire* filtered dataset
-actual_total = df_sel["weekly_sales"].sum(skipna=True)
+st.subheader("📈 Actual vs Stitched Forecast")
+st.altair_chart(chart, use_container_width=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# Compute all metrics from df_fc
+# ─────────────────────────────────────────────────────────────────────────────
+# Totals
+actual_total = df_fc["Actual"].sum()
+pred_total   = df_fc["Forecast"].sum()
 
-# 2) Predicted-full = historical actuals up to forecast start (warm-up)
-#    plus RF predictions thereafter
-pred_full = df_overlay["Pred_Warmup"].fillna(0) + df_overlay["Predicted"].fillna(0)
-pred_total = pred_full.sum(skipna=True)
+# Actual week‐to‐week growth
+first_act = df_fc["Actual"].iloc[0]
+last_act  = df_fc["Actual"].iloc[-1]
+delta_act = last_act - first_act
+pct_act   = (delta_act / first_act * 100) if first_act else float("nan")
 
-# 3) Differences
-abs_diff = pred_total - actual_total
-pct_diff = (abs_diff / actual_total * 100) if actual_total else float("nan")
+# Forecast week‐to‐week growth on its own series
+first_pred = df_fc["Forecast"].iloc[0]
+last_pred  = df_fc["Forecast"].iloc[-1]
+delta_pred = last_pred - first_pred
+pct_pred   = (delta_pred / first_pred * 100) if first_pred else float("nan")
 
-# --- Display with human_formatter
-show_metrics_generic([
-    ("Actual (full period)",    human_formatter(actual_total, is_money=True)),
-    ("Predicted (full period)", human_formatter(pred_total,   is_money=True)),
-    ("Absolute difference",     human_formatter(abs_diff,      is_money=True)),
-    ("% difference",            human_formatter(pct_diff,      is_percent=True)),
-])
+# Differences between Forecast and Actual metrics
+diff_total    = pred_total - actual_total
+diff_delta    = delta_pred - delta_act
+diff_pct      = pct_pred - pct_act
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Display metrics in two rows
+# ─────────────────────────────────────────────────────────────────────────────
+# Row 1: Actual metrics
+col_a1, col_a2, col_a3 = st.columns(3, gap="large")
+with col_a1:
+    st.metric("Actual", human_formatter(actual_total, is_money=True))
+with col_a2:
+    st.metric("$ Growth Actual",    human_formatter(delta_act,    is_money=True))
+with col_a3:
+    st.metric("% Growth Actual",    human_formatter(pct_act,      is_percent=True))
+
+# Row 2: Forecast metrics with arrows showing difference vs Actual
+col_f1, col_f2, col_f3 = st.columns(3, gap="large")
+with col_f1:
+    st.metric(
+        "Forecast",
+        human_formatter(pred_total, is_money=True),
+        delta=human_formatter(diff_total, is_money=True)
+    )
+with col_f2:
+    st.metric(
+        "$ Growth Forecast",
+        human_formatter(delta_pred,    is_money=True),
+        delta=human_formatter(diff_delta, is_money=True)
+    )
+with col_f3:
+    st.metric(
+        "% Growth Forecast",
+        human_formatter(pct_pred,    is_percent=True),
+        delta=human_formatter(diff_pct, is_percent=True)
+    )
+
+# ──────────────────────────────────────────────────────────────
+# Ranking grid: best & worst *forecast accuracy* by store or dept
+# ──────────────────────────────────────────────────────────────
+st.markdown("---")
+st.header("🏆 Forecast Accuracy Ranking")
+
+# decide grouping exactly as before...
+if store_choice == "All Stores":
+    if dept_choice == "All Departments":
+        group_col, label_name = "store", "Store"
+    else:
+        group_col, label_name = "store", f"Store (Dept {dept_choice})"
+else:
+    if dept_choice == "All Departments":
+        group_col, label_name = "dept", f"Dept in Store {store_choice}"
+    else:
+        group_col, label_name = None, f"Dept {dept_choice} in Store {store_choice}"
+
+# only makes sense when grouping
+if group_col is None:
+    st.info("Select a store *or* a department slice in the sidebar to see forecast accuracy rankings.")
+else:
+    records = []
+    for key, sub in df_sel.groupby(group_col):
+        # build & stitch each subgroup’s Actual vs Forecast
+        df_fc_sub = (
+            sub
+            .groupby("date")
+            .agg(
+                Actual        = ("weekly_sales",                 "sum"),
+                Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+            )
+            .reset_index()
+        )
+        pr_start = df_fc_sub.loc[df_fc_sub["Predicted_raw"] > 0, "date"].min()
+        df_fc_sub["Forecast"] = df_fc_sub["Actual"]
+        df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Forecast"] = (
+            df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Predicted_raw"]
+        )
+
+        # totals & accuracy
+        actual_total   = df_fc_sub["Actual"].sum()
+        forecast_total = df_fc_sub["Forecast"].sum()
+        err_pct        = abs(forecast_total - actual_total) / actual_total * 100 if actual_total else float("nan")
+        acc_pct        = 100 - err_pct
+
+        records.append({
+            label_name:   key,
+            "Accuracy %": acc_pct,   # <— renamed
+            "Error %":    err_pct,   # <— renamed
+        })
+
+    df_rank_acc = pd.DataFrame.from_records(records)
+
+    # render best/worst accuracy, coloring the Error % column as well
+    show_ranking_grid(
+        df_rank    = df_rank_acc,
+        metric_col = "Accuracy %",
+        label_col  = label_name,
+        top_n      = 5,
+        title      = f"Top & Bottom 5 by Forecast Accuracy",
+        green_cols = ["Error %"],
+        red_cols   = ["Error %"]
+    )
 
 
-# --- Footer
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model Feature Importance Ranking
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("🏅 Random Forest Feature Importances")
+
+
+# load the summary CSV (you’ve already got mae/r2 from it, now grab the rest)
+df_summary = pd.read_csv("RandomForest02_summary.csv")
+
+# parse the JSON dict in the ‘feat_importances’ column
+feat_imp_dict = json.loads(df_summary.loc[0, "feat_importances"])
+
+# turn into a DataFrame, sort by importance descending
+df_feat_imp = (
+    pd.Series(feat_imp_dict, name="importance")
+      .reset_index()
+      .rename(columns={"index": "feature"})
+      .sort_values("importance", ascending=False)
+      .reset_index(drop=True)
+)
+
+# take only the top N features
+top_n = 10
+df_top = df_feat_imp.head(top_n)
+
+# compute percent of total importance
+total_imp = df_feat_imp["importance"].sum()
+df_top["pct_of_total"] = df_top["importance"] / total_imp * 100
+
+# format just the percent
+df_top["pct_of_total_fmt"] = df_top["pct_of_total"].apply(lambda v: human_formatter(v, is_percent=True))
+
+# display only feature + % of total
+st.dataframe(
+    df_top[["feature", "pct_of_total_fmt"]]
+         .rename(columns={
+             "feature":         "Feature",
+             "pct_of_total_fmt":"% of Total Importance"
+         }),
+    use_container_width=True
+)
+
 footer()
-
 

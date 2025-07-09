@@ -82,26 +82,38 @@ def human_formatter(
     is_money:   bool = False,
     is_percent: bool = False,
 ) -> str:
-    """Compact K/M/B/T formatting, with optional ' $' or ' %' suffix."""
+    """
+    Compact formatting:
+    - Money uses K/M/B with one decimal for K and two for M/B/T.
+    - Percent ALWAYS shows two decimals.
+    - Otherwise integer formatting.
+    """
     try:
         val = float(x)
     except (TypeError, ValueError):
         return str(x)
-    abs_val, sign = abs(val), "-" if val < 0 else ""
+
+    if is_percent:
+        # TWO decimals so 99.96 stays 99.96, not 100.00
+        sign = "-" if val < 0 else ""
+        return f"{sign}{abs(val):.2f} %"
+
+    # now do money/number formatting
+    sign = "-" if val < 0 else ""
+    abs_val = abs(val)
     if abs_val >= 1e12:
-        out = f"{sign}{abs_val/1e12:.1f} T"
+        out = f"{sign}{abs_val/1e12:.2f} T"
     elif abs_val >= 1e9:
-        out = f"{sign}{abs_val/1e9:.1f} B"
+        out = f"{sign}{abs_val/1e9:.2f} B"
     elif abs_val >= 1e6:
-        out = f"{sign}{abs_val/1e6:.1f} M"
+        out = f"{sign}{abs_val/1e6:.2f} M"
     elif abs_val >= 1e3:
         out = f"{sign}{abs_val/1e3:.1f} K"
     else:
         out = f"{val:,.0f}"
+
     if is_money:
         return f"{out} $"
-    if is_percent:
-        return f"{out} %"
     return out
 
 
@@ -223,7 +235,7 @@ def sidebar_controls(
     # ← ranking moved here
     ranking_choice = st.sidebar.selectbox(
         "Ranking criterion",
-        ["Total Sales", "YOY % Growth", "YOY $ Growth"],
+        ["Total Sales", "% Growth", "$ Growth"],
         key="sel_ranking",
     )
 
@@ -234,58 +246,7 @@ def sidebar_controls(
         "ranking": ranking_choice,
     }
 
-def show_rf_metrics(mae: float, r2: float) -> None:
-    """
-    Display the MAE and R² side by side.
-    """
-    col1, col2, *_ = st.columns([1,1,6])
-    col1.metric("MAE", f"{mae:.2f}")
-    col2.metric("R²",  f"{r2:.3f}")
-
-def plot_actual_vs_rf(
-    df: pd.DataFrame,
-    date_col:   str = "date",
-    actual_col: str = "Actual",
-    warmup_col: str = "Pred_Warmup",
-    pred_col:   str = "Predicted",
-    title:      str = "Actual vs RF Predictions",
-    height:     int = 400
-) -> None:
-    # melt all three series
-    df_chart = (
-        df
-        .melt(
-            id_vars=[date_col],
-            value_vars=[actual_col, warmup_col, pred_col],
-            var_name="Series",
-            value_name="Sales"
-        )
-    )
-
-    # define the color mapping
-    color_scale = alt.Scale(
-        domain=["Actual", "Pred_Warmup", "Predicted"],
-        range=["steelblue", "steelblue", "orange"]
-    )
-
-    chart = (
-        alt.Chart(df_chart)
-           .mark_line()
-           .encode(
-               x=alt.X(f"{date_col}:T", title="Date"),
-               y=alt.Y("Sales:Q", title="Total Weekly Sales"),
-               color=alt.Color("Series:N", scale=color_scale, legend=None),
-               tooltip=[f"{date_col}:T", "Series:N", "Sales:Q"]
-           )
-           .properties(height=height)
-           .interactive()
-    )
-
-    if title:
-        st.subheader(title)
-    st.altair_chart(chart, use_container_width=True)
-
-def _smooth_cmap(base: str, lo: float = 0.30, hi: float = 1.00) -> colors.ListedColormap:
+def _smooth_cmap(base: str, lo: float = 0.75, hi: float = 1.4) -> colors.ListedColormap:
     """
     Trim a Matplotlib colormap to the [lo, hi] fraction of its range,
     yielding richer, more saturated colors.
@@ -295,28 +256,29 @@ def _smooth_cmap(base: str, lo: float = 0.30, hi: float = 1.00) -> colors.Listed
     return colors.ListedColormap(sliced)
 
 
-
 def show_ranking_grid(
     df_rank:    pd.DataFrame,
     metric_col: str,
     label_col:  str,
     top_n:      int              = 5,
     title:      Optional[str]    = None,
+    green_cols: Optional[list[str]] = None,  # cols to style green
+    red_cols:   Optional[list[str]] = None,  # cols to style red
 ) -> None:
     if title:
         st.subheader(title)
 
     # pick & sort
-    best  = (
+    best = (
         df_rank
           .nlargest(top_n, metric_col)
-          .sort_values(metric_col, ascending=False)
+          .sort_values(metric_col, ascending=True)
           .reset_index(drop=True)
     )
     worst = (
         df_rank
           .nsmallest(top_n, metric_col)
-          .sort_values(metric_col, ascending=True)
+          .sort_values(metric_col, ascending=False)
           .reset_index(drop=True)
     )
 
@@ -324,31 +286,56 @@ def show_ranking_grid(
     green_cmap = _smooth_cmap("Greens")
     red_cmap   = _smooth_cmap("Reds")
 
-    # global vmin/vmax for consistency
+    # global vmin/vmax for the main metric
     vals = df_rank[metric_col].astype(float)
     vmin, vmax = float(vals.min()), float(vals.max())
 
-    money_flag   = metric_col != "yoy_pct"
-    percent_flag = metric_col == "yoy_pct"
-    fmt_fn = lambda v: human_formatter(v, is_money=money_flag, is_percent=percent_flag)
+    # detect percent vs money
+    key = metric_col.lower()
+    percent_flag = (
+        key.endswith("%") or
+        "_pct" in key or
+        key.startswith("pct") or
+        key.endswith("percent")
+    )
+    money_flag = not percent_flag
 
-    # style
+    # formatter for the main metric
+    fmt_main  = lambda v: human_formatter(v, is_money=money_flag, is_percent=percent_flag)
+    # always format error_% as percent
+    fmt_error = lambda v: human_formatter(v, is_percent=True)
+
+    # default columns for coloring if none passed
+    green_subset = green_cols or [metric_col]
+    red_subset   = red_cols   or [metric_col]
+
     best_style = (
         best.style
-            .format({metric_col: fmt_fn})
-            .background_gradient(cmap=green_cmap, subset=[metric_col], vmin=vmin, vmax=vmax)
+            .format({
+                metric_col: fmt_main,
+                "error_%":  fmt_error
+            })
+            # apply green gradient to chosen columns
+            .background_gradient(
+                cmap=green_cmap, subset=green_subset, vmin=vmin, vmax=vmax
+            )
     )
     worst_style = (
         worst.style
-            .format({metric_col: fmt_fn})
-            .background_gradient(cmap=red_cmap.reversed(), subset=[metric_col], vmin=vmin, vmax=vmax)
+            .format({
+                metric_col: fmt_main,
+                "error_%":  fmt_error
+            })
+            # apply red gradient to chosen columns
+            .background_gradient(
+                cmap=red_cmap.reversed(), subset=red_subset, vmin=vmin, vmax=vmax
+            )
     )
 
-    # display
     col1, col2 = st.columns(2, gap="small")
     with col1:
         st.markdown("#### 🟢 Best")
-        st.dataframe(best_style,  use_container_width=True, hide_index=True)
+        st.dataframe(best_style, use_container_width=True, hide_index=True)
     with col2:
         st.markdown("#### 🔴 Worst")
         st.dataframe(worst_style, use_container_width=True, hide_index=True)
