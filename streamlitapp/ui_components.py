@@ -256,14 +256,17 @@ def _smooth_cmap(base: str, lo: float = 0.75, hi: float = 1.4) -> colors.ListedC
     return colors.ListedColormap(sliced)
 
 
+# ──────────────────────────────────────────────────────────────
+# Updated show_ranking_grid
+# ──────────────────────────────────────────────────────────────
 def show_ranking_grid(
     df_rank:    pd.DataFrame,
     metric_col: str,
     label_col:  str,
     top_n:      int              = 5,
     title:      Optional[str]    = None,
-    green_cols: Optional[list[str]] = None,  # cols to style green
-    red_cols:   Optional[list[str]] = None,  # cols to style red
+    green_cols: Optional[list[str]] = None,
+    red_cols:   Optional[list[str]] = None,
 ) -> None:
     if title:
         st.subheader(title)
@@ -272,64 +275,60 @@ def show_ranking_grid(
     best = (
         df_rank
           .nlargest(top_n, metric_col)
-          .sort_values(metric_col, ascending=True)
+          .sort_values(metric_col, ascending=False)
           .reset_index(drop=True)
     )
     worst = (
         df_rank
           .nsmallest(top_n, metric_col)
-          .sort_values(metric_col, ascending=False)
+          .sort_values(metric_col, ascending=True)
           .reset_index(drop=True)
     )
 
-    # build colormaps
+    # color maps
     green_cmap = _smooth_cmap("Greens")
     red_cmap   = _smooth_cmap("Reds")
 
-    # global vmin/vmax for the main metric
+    # global min/max for heatmap
     vals = df_rank[metric_col].astype(float)
     vmin, vmax = float(vals.min()), float(vals.max())
 
-    # detect percent vs money
+    # detect percent vs money for main metric
     key = metric_col.lower()
     percent_flag = (
         key.endswith("%") or
         "_pct" in key or
         key.startswith("pct") or
+        "%" in key or
         key.endswith("percent")
     )
     money_flag = not percent_flag
 
-    # formatter for the main metric
+    # formatters
     fmt_main  = lambda v: human_formatter(v, is_money=money_flag, is_percent=percent_flag)
-    # always format error_% as percent
     fmt_error = lambda v: human_formatter(v, is_percent=True)
 
-    # default columns for coloring if none passed
+    # find the error column dynamically
+    error_col = next((c for c in df_rank.columns if "error" in c.lower()), None)
+
+    # default subsets
     green_subset = green_cols or [metric_col]
     red_subset   = red_cols   or [metric_col]
 
+    # build format map
+    format_map = { metric_col: fmt_main }
+    if error_col:
+        format_map[error_col] = fmt_error
+
     best_style = (
         best.style
-            .format({
-                metric_col: fmt_main,
-                "error_%":  fmt_error
-            })
-            # apply green gradient to chosen columns
-            .background_gradient(
-                cmap=green_cmap, subset=green_subset, vmin=vmin, vmax=vmax
-            )
+            .format(format_map)
+            .background_gradient(cmap=green_cmap, subset=green_subset, vmin=vmin, vmax=vmax)
     )
     worst_style = (
         worst.style
-            .format({
-                metric_col: fmt_main,
-                "error_%":  fmt_error
-            })
-            # apply red gradient to chosen columns
-            .background_gradient(
-                cmap=red_cmap.reversed(), subset=red_subset, vmin=vmin, vmax=vmax
-            )
+            .format(format_map)
+            .background_gradient(cmap=red_cmap.reversed(), subset=red_subset, vmin=vmin, vmax=vmax)
     )
 
     col1, col2 = st.columns(2, gap="small")
@@ -339,10 +338,24 @@ def show_ranking_grid(
     with col2:
         st.markdown("#### 🔴 Worst")
         st.dataframe(worst_style, use_container_width=True, hide_index=True)
+    
+    
 
 
-
-def footer() -> None:
+def footer(
+    linkedin: str = "https://www.linkedin.com/in/jorgemmlrodrigues/",
+    email:    str = "jorgemmlrodrigues@gmail.com",
+    github:   str = "https://github.com/JorgeMMLRodrigues"
+):
     st.markdown("---")
     st.caption("Jorge Rodrigues | Data Analyst @ Ironhack")
-
+    st.markdown(
+        f"""
+        <div style="text-align:center; font-size:0.9rem">
+          🔗 <a href="{linkedin}" target="_blank">LinkedIn</a> | 
+          ✉️ <a href="{email}">Email</a> | 
+          🐙 <a href="{github}" target="_blank">GitHub</a>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )

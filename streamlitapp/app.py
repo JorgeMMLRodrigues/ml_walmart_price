@@ -45,6 +45,7 @@ depts  = ["All Departments"] + [str(d) for d in sorted(df["dept"].unique())]
 controls = sidebar_controls(stores, depts)
 store_choice = controls["store"]
 dept_choice  = controls["dept"]
+window_choice  = controls["window"] 
 limit_window = controls["window"]
 metric_label = controls["ranking"]           # ← use sidebar choice
 metric_map   = {
@@ -67,15 +68,25 @@ if store_choice == "All Stores" and dept_choice == "All Departments":
 else:
     df_graph = df_sel
 
-# ------------------------------------
-# Compute metrics
-# ------------------------------------
+st.set_page_config(page_title="Walmart Dashboard", page_icon="🛒")
 
+# show the logo + title at the top
+header(
+    logo_path="images/walmart_logo.svg",
+    title="🏪 Walmart Database",
+    logo_width=300,  # was 150
+    logo_style={"padding": "2rem 0 1rem 0", "background": None},
+    title_style={"value_size": 40, "value_color": "#333", "padding": "0 0 2rem 0"},
+)
+
+
+
+# ------------------------------------
 # Get start/end dates and counts in one call
+# ------------------------------------
 stats = span_stats(df_sel)
 stores_start, stores_end = stats["counts"]["store"]
-depts_start, depts_end   = stats["counts"]["dept"]
-
+# remove depts_start/end here
 span_start  = stats["start_date"].date()
 span_end    = stats["end_date"].date()
 total_weeks = week_span(df_sel, date_col="date", limit_window=limit_window)
@@ -83,32 +94,39 @@ total_weeks = week_span(df_sel, date_col="date", limit_window=limit_window)
 # ------------------------------------
 # Render UI
 # ------------------------------------
-header(
-    "images/Walmart_logo.svg",
-    title="🏪 Walmart Weekly Sales Dashboard",
-    logo_width=150,
-    logo_style={"padding": "2rem 0 1rem 0", "background": None},
-    title_style={"value_size": 40, "value_color": "#333", "padding": "0 0 2rem 0"},
-)
+basic_metrics = []
 
-basic_metrics = [
-    (f"🏪 Stores ({y1}→{y2})", f"{stores_start} → {stores_end}"),
-    (f"🗂 Depts ({y1}→{y2})", f"{depts_start} → {depts_end}"),
+# Stores: total vs specific
+if store_choice == "All Stores":
+    basic_metrics.append(("🏪 Stores", str(stores_end)))
+else:
+    basic_metrics.append(("🏪 Store", store_choice))
+
+# Depts: recalc from df_sel so it’s always accurate
+if dept_choice == "All Departments":
+    # count distinct departments *after* filtering
+    current_depts = df_sel["dept"].nunique()
+    basic_metrics.append(("🗂 Depts", str(current_depts)))
+else:
+    basic_metrics.append(("📂 Dept", dept_choice))
+
+# Weeks & date span
+basic_metrics.extend([
     ("📆 Weeks Selected", str(total_weeks)),
     {
         "styled": True,
         "props": {
             "width": "100%", "display": "block", "text_align": "center",
             "margin": "0", "padding": "0",
-            "label": "📅 Date Span", "label_size": 18, "label_color": "#888",
+            "label": "📅 Date Span", "label_size": 18, "label_color": "",
             "label_weight": "normal", "label_margin": "0 0 .25rem 0",
             "value": f"{span_start} → {span_end}",
             "value_size": 20, "value_color": "#000",
             "value_weight": "600", "value_margin": "0",
         }
     },
-    ("💰 Total Sales", human_formatter(total_sales(df_sel)))
-]
+    ("💰 Total Sales", human_formatter(total_sales(df_sel), is_money=True))
+])
 
 show_metrics_generic(basic_metrics)
 
@@ -183,14 +201,8 @@ else:
             .groupby("date")
             .agg(
                 Actual        = ("weekly_sales",                 "sum"),
-                Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
             )
             .reset_index()
-        )
-        pr_start = df_fc_sub.loc[df_fc_sub["Predicted_raw"] > 0, "date"].min()
-        df_fc_sub["Forecast"] = df_fc_sub["Actual"]
-        df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Forecast"] = (
-            df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Predicted_raw"]
         )
 
         # compute metrics
@@ -211,14 +223,29 @@ else:
         records.append({ label_name: key, metric_col: val })
 
     df_rank = pd.DataFrame.from_records(records)
+        # 1) build your rename map
+    rename_map = { group_col: label_name }
+    if metric_col == "yoy_pct":
+        rename_map["yoy_pct"]  = "% Growth"
+        display_col = "% Growth"
+    elif metric_col == "yoy_diff":
+        rename_map["yoy_diff"] = "$ Growth"
+        display_col = "$ Growth"
+    else:
+        display_col = metric_col  # e.g. "total"
 
+    # 2) make a display copy with just the headers swapped
+    df_rank_display = df_rank.rename(columns=rename_map)
+
+    # 3) pass that into your grid, pointing at the new display name
     show_ranking_grid(
-        df_rank    = df_rank.rename(columns={group_col: label_name}),
-        metric_col = metric_col,
+        df_rank    = df_rank_display,
+        metric_col = display_col,
         label_col  = label_name,
         top_n      = 5,
         title      = f"Ranked by {metric_label}"
     )
+
 
 
 # ────────────────────────────────────────────────────────
@@ -305,9 +332,10 @@ if group_col is not None:
                     .encode(x="date:T", y="value:Q")
         st.altair_chart((main+loess).interactive(), use_container_width=True)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-st.title("Random Forest Sales Forecast Comparison")
+# Random Forest
+# ─────────────────────────────────────────────────────────────────────────────
+st.title("⚙️ Random Forest Sales Forecast Comparison")
 
 # --- RF summary metrics
 mae, r2 = load_rf_summary("RandomForest02_summary.csv")
@@ -323,12 +351,12 @@ show_metrics_generic([
 # ─────────────────────────────────────────────────────────────────────────────
 df_fc = (
     df_sel
-    .groupby("date")
-    .agg(
-        Actual        = ("weekly_sales",                 "sum"),
-        Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
-    )
-    .reset_index()
+      .groupby("date")
+      .agg(
+          Actual        = ("weekly_sales",                 "sum"),
+          Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+      )
+      .reset_index()
 )
 
 pred_start = df_fc.loc[df_fc["Predicted_raw"] > 0, "date"].min()
@@ -337,20 +365,33 @@ df_fc["Forecast"] = df_fc["Actual"]
 df_fc.loc[df_fc["date"] >= pred_start, "Forecast"] = df_fc.loc[df_fc["date"] >= pred_start, "Predicted_raw"]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# **KEY**: sort by date so iloc picks the true endpoints of the selected span
+# ─────────────────────────────────────────────────────────────────────────────
+df_fc = df_fc.sort_values("date").reset_index(drop=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Plot Actual vs Stitched Forecast
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Mask Forecast always
 df_fc["Forecast_vis"] = df_fc["Forecast"].where(df_fc["date"] >= pred_start, pd.NA)
 
-# now melt Actual + the masked forecast
-df_chart = df_fc.melt(
-    id_vars   ="date",
-    value_vars=["Actual","Forecast_vis"],
-    var_name  ="Series",
-    value_name="Sales"
-)
+# Mask Actual only when in the 52-week view
+if window_choice == "Last 52 Weeks":
+    df_fc["Actual_vis"] = df_fc["Actual"].where(df_fc["date"] >= pred_start, pd.NA)
+else:
+    df_fc["Actual_vis"] = df_fc["Actual"]
 
-# rename for display
-df_chart["Series"] = df_chart["Series"].replace({"Forecast_vis":"Forecast"})
+df_chart = df_fc.melt(
+    id_vars   = "date",
+    value_vars= ["Actual_vis","Forecast_vis"],
+    var_name  = "Series",
+    value_name= "Sales"
+)
+df_chart["Series"] = df_chart["Series"].replace({
+    "Actual_vis":   "Actual",
+    "Forecast_vis": "Forecast"
+})
 
 color_scale = alt.Scale(domain=["Actual","Forecast"], range=["steelblue","orange"])
 chart = (
@@ -365,9 +406,9 @@ chart = (
        .properties(height=400)
        .interactive()
 )
-
 st.subheader("📈 Actual vs Stitched Forecast")
 st.altair_chart(chart, use_container_width=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Compute all metrics from df_fc
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,36 +416,34 @@ st.altair_chart(chart, use_container_width=True)
 actual_total = df_fc["Actual"].sum()
 pred_total   = df_fc["Forecast"].sum()
 
-# Actual week‐to‐week growth
+# Actual start‐to‐end growth
 first_act = df_fc["Actual"].iloc[0]
 last_act  = df_fc["Actual"].iloc[-1]
 delta_act = last_act - first_act
 pct_act   = (delta_act / first_act * 100) if first_act else float("nan")
 
-# Forecast week‐to‐week growth on its own series
+# Forecast start‐to‐end growth
 first_pred = df_fc["Forecast"].iloc[0]
 last_pred  = df_fc["Forecast"].iloc[-1]
 delta_pred = last_pred - first_pred
 pct_pred   = (delta_pred / first_pred * 100) if first_pred else float("nan")
 
 # Differences between Forecast and Actual metrics
-diff_total    = pred_total - actual_total
-diff_delta    = delta_pred - delta_act
-diff_pct      = pct_pred - pct_act
+diff_total = pred_total  - actual_total
+diff_delta = delta_pred  - delta_act
+diff_pct   = pct_pred    - pct_act
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Display metrics in two rows
 # ─────────────────────────────────────────────────────────────────────────────
-# Row 1: Actual metrics
 col_a1, col_a2, col_a3 = st.columns(3, gap="large")
 with col_a1:
-    st.metric("Actual", human_formatter(actual_total, is_money=True))
+    st.metric("Actual",           human_formatter(actual_total, is_money=True))
 with col_a2:
-    st.metric("$ Growth Actual",    human_formatter(delta_act,    is_money=True))
+    st.metric("$ Growth Actual",  human_formatter(delta_act,      is_money=True))
 with col_a3:
-    st.metric("% Growth Actual",    human_formatter(pct_act,      is_percent=True))
+    st.metric("% Growth Actual",  human_formatter(pct_act,        is_percent=True))
 
-# Row 2: Forecast metrics with arrows showing difference vs Actual
 col_f1, col_f2, col_f3 = st.columns(3, gap="large")
 with col_f1:
     st.metric(
@@ -415,23 +454,23 @@ with col_f1:
 with col_f2:
     st.metric(
         "$ Growth Forecast",
-        human_formatter(delta_pred,    is_money=True),
+        human_formatter(delta_pred,   is_money=True),
         delta=human_formatter(diff_delta, is_money=True)
     )
 with col_f3:
     st.metric(
         "% Growth Forecast",
-        human_formatter(pct_pred,    is_percent=True),
-        delta=human_formatter(diff_pct, is_percent=True)
+        human_formatter(pct_pred,     is_percent=True),
+        delta=human_formatter(diff_pct,   is_percent=True)
     )
 
 # ──────────────────────────────────────────────────────────────
-# Ranking grid: best & worst *forecast accuracy* by store or dept
+# Ranking grid: best & worst forecast accuracy by store or dept
 # ──────────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("🏆 Forecast Accuracy Ranking")
+st.header("🏆 Sales Forecast Accuracy Ranking")
 
-# decide grouping exactly as before...
+# 1) decide grouping...
 if store_choice == "All Stores":
     if dept_choice == "All Departments":
         group_col, label_name = "store", "Store"
@@ -443,21 +482,20 @@ else:
     else:
         group_col, label_name = None, f"Dept {dept_choice} in Store {store_choice}"
 
-# only makes sense when grouping
+# 2) only makes sense when grouping
 if group_col is None:
     st.info("Select a store *or* a department slice in the sidebar to see forecast accuracy rankings.")
 else:
     records = []
     for key, sub in df_sel.groupby(group_col):
-        # build & stitch each subgroup’s Actual vs Forecast
+        # build & stitch Actual vs Forecast
         df_fc_sub = (
-            sub
-            .groupby("date")
-            .agg(
-                Actual        = ("weekly_sales",                 "sum"),
-                Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
-            )
-            .reset_index()
+            sub.groupby("date")
+               .agg(
+                   Actual        = ("weekly_sales",                 "sum"),
+                   Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+               )
+               .reset_index()
         )
         pr_start = df_fc_sub.loc[df_fc_sub["Predicted_raw"] > 0, "date"].min()
         df_fc_sub["Forecast"] = df_fc_sub["Actual"]
@@ -465,27 +503,27 @@ else:
             df_fc_sub.loc[df_fc_sub["date"] >= pr_start, "Predicted_raw"]
         )
 
-        # totals & accuracy
+        # compute totals & percent‐error
         actual_total   = df_fc_sub["Actual"].sum()
         forecast_total = df_fc_sub["Forecast"].sum()
-        err_pct        = abs(forecast_total - actual_total) / actual_total * 100 if actual_total else float("nan")
-        acc_pct        = 100 - err_pct
+        diff_frac      = (forecast_total - actual_total) / actual_total if actual_total else float("nan")
+        err_pct        = abs(diff_frac) * 100  # now true percent
+        acc_pct        = max(0, min(100, 100 - err_pct))
 
         records.append({
             label_name:   key,
-            "Accuracy %": acc_pct,   # <— renamed
-            "Error %":    err_pct,   # <— renamed
+            "Accuracy %": acc_pct,
+            "Error %":    err_pct,
         })
 
     df_rank_acc = pd.DataFrame.from_records(records)
 
-    # render best/worst accuracy, coloring the Error % column as well
     show_ranking_grid(
         df_rank    = df_rank_acc,
         metric_col = "Accuracy %",
         label_col  = label_name,
         top_n      = 5,
-        title      = f"Top & Bottom 5 by Forecast Accuracy",
+        title      = "Top & Bottom 5 by Forecast Accuracy",
         green_cols = ["Error %"],
         red_cols   = ["Error %"]
     )
@@ -514,7 +552,7 @@ df_feat_imp = (
 )
 
 # take only the top N features
-top_n = 10
+top_n = 6
 df_top = df_feat_imp.head(top_n)
 
 # compute percent of total importance
@@ -533,6 +571,12 @@ st.dataframe(
          }),
     use_container_width=True
 )
+
+
+
+
+
+
 
 footer()
 
