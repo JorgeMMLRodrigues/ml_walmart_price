@@ -40,21 +40,54 @@ y2 = int(df["date"].dt.year.max())
 # ------------------------------------
 # Sidebar controls
 # ------------------------------------
+# 1) Build the store list and render its selectbox
 stores = ["All Stores"] + [str(s) for s in sorted(df["store"].unique())]
-depts  = ["All Departments"] + [str(d) for d in sorted(df["dept"].unique())]
-controls = sidebar_controls(stores, depts)
-store_choice = controls["store"]
-dept_choice  = controls["dept"]
-window_choice  = controls["window"] 
-limit_window = controls["window"]
-metric_label = controls["ranking"]           # ← use sidebar choice
-metric_map   = {
-    "Total Sales":  "total",
-    "% Growth": "yoy_pct",
-    "$ Growth": "yoy_diff",
+store_choice = st.sidebar.selectbox("Select Store", stores, key="sel_store")
+
+# 2) Based on that choice, build the dept list
+if store_choice == "All Stores":
+    # show every department
+    dept_values = sorted(df["dept"].unique())
+else:
+    # compare store_choice (a string) to the string-cast of df["store"]
+    mask = df["store"].astype(str) == store_choice
+    dept_values = sorted(df.loc[mask, "dept"].unique())
+
+dept_options = ["All Departments"] + [str(d) for d in dept_values]
+
+# 3) Render the dept selectbox with the filtered options
+dept_choice = st.sidebar.selectbox("Select Department", dept_options, key="sel_dept")
+
+# 4) The rest is unchanged
+window_choice = st.sidebar.selectbox(
+    "Limit to:",
+    ["Full Range", "Last 52 Weeks", "Last 104 Weeks"],
+    key="sel_window",
+)
+ranking_choice = st.sidebar.selectbox(
+    "Ranking criterion",
+    ["Total Sales", "% Growth", "$ Growth"],
+    key="sel_ranking",
+)
+
+# 5) Pack into your controls dict (so downstream code stays the same)
+controls = {
+    "store":   store_choice,
+    "dept":    dept_choice,
+    "window":  window_choice,
+    "ranking": ranking_choice,
 }
-metric_col = metric_map[metric_label]
-limit_window = controls["window"]
+store_choice  = controls["store"]
+dept_choice   = controls["dept"]
+window_choice = controls["window"]
+metric_label  = controls["ranking"]
+metric_map    = {
+    "Total Sales": "total",
+    "% Growth":    "yoy_pct",
+    "$ Growth":    "yoy_diff",
+}
+metric_col    = metric_map[metric_label]
+limit_window  = controls["window"]
 # ------------------------------------
 # Data filtering
 # ------------------------------------
@@ -96,20 +129,30 @@ total_weeks = week_span(df_sel, date_col="date", limit_window=limit_window)
 # ------------------------------------
 basic_metrics = []
 
-# Stores: total vs specific
+# Stores: total vs specific (exactly your original logic)
 if store_choice == "All Stores":
     basic_metrics.append(("🏪 Stores", str(stores_end)))
 else:
     basic_metrics.append(("🏪 Store", store_choice))
 
-# Depts: recalc from df_sel so it’s always accurate
+# Depts: now taking store_choice into account
 if dept_choice == "All Departments":
-    # count distinct departments *after* filtering
-    current_depts = df_sel["dept"].nunique()
-    basic_metrics.append(("🗂 Depts", str(current_depts)))
-else:
-    basic_metrics.append(("📂 Dept", dept_choice))
+    if store_choice == "All Stores":
+        # case: All Stores + All Depts → sum per‐store unique counts
+        total_depts = (
+            df_sel
+            .groupby("store")["dept"]
+            .nunique()
+            .sum()
+        )
+    else:
+        # case: single store + All Depts → just count unique in this store
+        total_depts = df_sel["dept"].nunique()
 
+    basic_metrics.append(("🗂 Depts", str(total_depts)))
+else:
+    # any store_selection + specific Dept → show the dept name
+    basic_metrics.append(("📂 Dept", dept_choice))
 # Weeks & date span
 basic_metrics.extend([
     ("📆 Weeks Selected", str(total_weeks)),
@@ -163,14 +206,10 @@ if group_col is None:
         df_sel
         .groupby("date")
         .agg(
-            Actual        = ("weekly_sales",                 "sum"),
-            Predicted_raw = ("rf_02_predicted_weekly_sales", "sum")
+            Actual = ("weekly_sales", "sum")
         )
         .reset_index()
     )
-    pred_start = df_fc.loc[df_fc["Predicted_raw"] > 0, "date"].min()
-    df_fc["Forecast"] = df_fc["Actual"]
-    df_fc.loc[df_fc["date"] >= pred_start, "Forecast"] = df_fc.loc[df_fc["date"] >= pred_start, "Predicted_raw"]
 
     # compute the three
     act_tot   = df_fc["Actual"].sum()

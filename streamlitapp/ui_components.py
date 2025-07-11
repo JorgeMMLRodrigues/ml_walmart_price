@@ -219,20 +219,25 @@ def show_metrics_generic(
 
 # New: sidebar controls grouping
 
-def sidebar_controls(
-    stores: list[str],
-    depts:  list[str],
-) -> dict[str, str]:
+def sidebar_controls(df: pd.DataFrame) -> dict[str, str]:
+    # 1) Store picker (always shows first, writing sel_store into session_state)
+    stores = ["All Stores"] + [str(s) for s in sorted(df["store"].unique())]
     store_choice = st.sidebar.selectbox("Select Store", stores, key="sel_store")
-    dept_choice  = st.sidebar.selectbox("Select Department", depts, key="sel_dept")
 
+    # 2) Dept picker, filtered by that store_choice
+    if store_choice == "All Stores":
+        dept_values = sorted(df["dept"].unique())
+    else:
+        dept_values = sorted(df.loc[df["store"] == store_choice, "dept"].unique())
+    depts = ["All Departments"] + [str(d) for d in dept_values]
+    dept_choice = st.sidebar.selectbox("Select Department", depts, key="sel_dept")
+
+    # 3) The rest of your controls unchanged
     window_choice = st.sidebar.selectbox(
         "Limit to:",
         ["Full Range", "Last 52 Weeks", "Last 104 Weeks"],
         key="sel_window",
     )
-
-    # ← ranking moved here
     ranking_choice = st.sidebar.selectbox(
         "Ranking criterion",
         ["Total Sales", "% Growth", "$ Growth"],
@@ -353,8 +358,8 @@ def footer(
         f"""
         <div style="text-align:center; font-size:0.9rem">
           🔗 <a href="{linkedin}" target="_blank">LinkedIn</a> | 
-          ✉️ <a href="{email}">Email</a> | 
-          🐙 <a href="{github}" target="_blank">GitHub</a>
+          📧 <a href="{email}">Email</a> | 
+          📁 <a href="{github}" target="_blank">GitHub</a>
         </div>
         """,
         unsafe_allow_html=True
