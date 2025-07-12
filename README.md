@@ -14,8 +14,7 @@ A full machine learning pipeline and interactive dashboard to analyze and foreca
 4. [📈 Insights](#-insights)
 5. [💻 Usage Examples](#-usage-examples)
 6. [🤝 Contributing](#-contributing)
-7. [📄 License](#-license)
-8. [📬 Contact](#-contact)
+7. [📬 Contact](#-contact)
 
 ---
 
