@@ -8,14 +8,14 @@ A full machine learning pipeline and interactive dashboard to analyze and foreca
 
 ## 📋 Table of Contents
 
-1. [📌 Project Overview](#project-overview)  
-2. [📊 Dataset](#dataset)  
-3. [🔄 Pipeline & Workflow](#pipeline--workflow)  
-4. [📈 Insights](#insights)  
-5. [💻 Usage Examples](#usage-examples)  
-6. [🤝 Contributing](#contributing)  
-7. [📄 License](#license)  
-8. [📬 Contact](#contact)
+1. [📌 Project Overview](#-project-overview)
+2. [📊 Dataset](#-dataset)
+3. [🔄 Pipeline & Workflow](#-pipeline--workflow)
+4. [📈 Insights](#-insights)
+5. [💻 Usage Examples](#-usage-examples)
+6. [🤝 Contributing](#-contributing)
+7. [📄 License](#-license)
+8. [📬 Contact](#-contact)
 
 ---
 
