@@ -75,9 +75,8 @@ This project analyzes Walmart’s sales data and forecasts future weekly sales u
 
 ### Install requirements:
 
-```bash
-pip install -r requirements.txt
-```
+- For notebook usage just ran all cells. If you want to run on kaggle just delete the """ in the first cell. ( note that there is a function called "%%skip". This function was used to run all cell but those that start with that.
+- To check streamlit app just run the streamlit.bat found in the main directory.
 ---
 
 ## 🤝 Contributing
