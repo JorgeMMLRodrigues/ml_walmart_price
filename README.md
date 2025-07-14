@@ -1,5 +1,13 @@
 # 🛒 Walmart Sales Analysis & Forecast Dashboard
 
+## 🖼️ Final StreamLit Result
+
+![Alt text](streamlitapp/images/streamlit01.jpg)
+![Alt text](streamlitapp/images/streamlit02.jpg)
+
+
+
+
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg) ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
 A full machine learning pipeline and interactive dashboard to analyze and forecast Walmart sales. Combines model experimentation with an intuitive Streamlit app for exploring weekly sales trends and predictions.
